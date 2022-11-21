@@ -1,1 +1,472 @@
-Código
+/*****************************************************************************************************
+**                                                                                                  **
+**                        SOFTWARE EXTRUSORA DE FILAMENTOS - OPEN SOURCE                            **
+**      TRABALHO DE CONCLUSAO DE CURSO SUBMETIDO AO CURSO DE ENGENHARIA DE CONTROLE E AUTOMAÇÃO     **
+**                  INSTITUTO FEDERAL DE SANTA CATARINA - IFSC- CAMPUS CHAPECO                      **
+**                                                                                                  **
+******************************************************************************************************/
+
+
+//###RESUMO DE CONEXOES###
+/*    MAX6675 - SENSOR DE TEMPERATURA
+      CS          -->     D10
+      SO          -->     D12
+      SCK         -->     D13
+      Vcc         -->     Vcc(5v)
+      Gnd         -->     Gnd
+
+
+      I2C LCD - ARDUINO
+      SCL         -->     SCL
+      SDA         -->     SDA
+      Vcc         -->     Vcc (5v)
+      Gnd         -->     Gnd      */
+
+
+
+//###CONFIGURACAO DA BIBLIOTECA DO ENCODER ROTATIVO###
+#include <RotaryEncoder.h>                                                   //BIBLIOTECA PARA ENCODER DE SELECAO
+
+//###CONFIGURACAO DO SENSOR DE TEMPERATURA###
+#include "max6675.h"                                                         //BIBLIOTECA PARA SENSOR DE TEMPERATURA
+#include <SPI.h>                                                             //BIBLIOTECA PARA COMUNICACAO DO MODULO MAX6675 COM O ARDUINO EM SPI
+
+#define MAX6675_CS   10                                                      //COMUNICACAO SPI-CS DO MODULO MAX6675
+#define MAX6675_SO   12                                                      //COMUNICACAO SPI-SO DO MODULO MAX6675
+#define MAX6675_SCK  13                                                      //COMUNICACAO SPI-SCK DO MODULO MAX6675
+
+//####CONFIGURACAO DO LCD###
+#include <Wire.h>                                                            //BIBLIOTECA PARA MODULO I2C DO DISPLAY
+#include <LiquidCrystal_I2C.h>                                               //BIBLIOTECA UTILIZADA PARA DISPLAY
+LiquidCrystal_I2C lcd(0x27, 20, 4);                                          //ENDERECO DO DISPLAY LCD E MODELO
+
+//###VARIAVEIS DE ACIONAMENTO###
+int PWM_pin = 3;                                                             //VARIAVEL DE SAIDA DO PINO 3 - ACIONA MOSFET
+
+//###VARIAVEIS PARA ENCODER ROTATIVO###
+int clk = 8;                                                                 //VARIAVEL CLK PARA O ENCODER ROTATIVO
+int data = 11;                                                               //VARIAVEL DATA PARA O ENCODER ROTATIVO
+
+int clk_State;                                                               //VARIAVEL PARA ARMAZENAR O ESTADO CLOCK DO ENCODER
+int Last_State;                                                              //VARIAVEL PARA ARMAZENAR O ULTIMO ESTADO
+bool dt_State;                                                               //vARIAVEL DE DADOS DO ENCODER
+int button_pressed = 0;                                                      //VARIAVEL DE LEITURA DO BOTAO                                         
+int menu_activated = 0;                                                      //STATUS DO MENU
+
+//###VARIAVEIS CONTROLE DE TEMPERATURA###
+float set_temperature = 150;                                                 //VALOR DE SET POINT - ALTERADO CONFORME TERMOPLÃ�STICO
+
+float temperature_read = 0.0;                                                //VALOR ATUAL DE TEMPERATURA
+float PID_error = 0;                                                         //ERRO ACUMULADO DO PID
+float previous_error = 0;                                                    //ERRO ANTERIOR
+float elapsedTime, Time, timePrev;                                           //CONTROLE TEMPORAL PARA CALCULOS DO PID
+float PID_value = 0;                                                         //VALOR DO PID
+
+float last_set_temperature = 0;
+
+//CONSTANTES PID OBTIDAS POR MEIO DA ANÁLISE DA CURVA DE REACAO ZIEGLER E NICHOLS
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+int kp = 40;                                                                                        //
+int ki = 0.025;                                                                                     //
+int kd = 10;                                                                                        //
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+
+int PID_p = 0;    int PID_i = 0;    int PID_d = 0;                           //VARIAVEIS PARA ARMAZENAR OS VALORES CALCULADOS
+float last_kp = 0;                                                           //VARIAVEL ARMAZENA ULTIMO VALOR DE PROPORCIONAL
+float last_ki = 0;                                                           //VARIAVEL ARMAZENA ULTIMO VALOR DE INTEGRAL 
+float last_kd = 0;                                                           //VARIAVEL ARMAZENA ULTIMO VALOR DE DERIVATIVO
+int PID_values_fixed = 0;
+
+//###VARIAVEIS PARA MOTOR DA EXTRUSORA###
+#define MotorPWM 9                                                           //DEFINE SAIDA 9 COMO SAIDA PWM PARA MOTOR                         
+#define AjustePWM A0                                                         //DEFINE ENTRADA ANALOGICA A0 COMO ENTRADA PARA VALOR DE ROTACAO
+int ValorAjuste = 0;                                                         //VARIAVEL PARA RECEBER VALOR DE LEITURA
+int Duty = 0;                                                                //VARIÁVEL PARA ARMAZENAR VALOR DE CICLO ATIVO
+
+
+//###VARIAVEIS PARA SEGURANCA DA EXTRUSORA###
+int cont = 0;                                                                //CONTADOR PARA DABER SE E O PRIMEIRO LOOP - SEGURANCA NAO ATIVAR A ROSCA
+#define emer 2                                                               //DEFINE PORTA 2 COMO PORTA EMERGENCIA                                                        
+
+void setup() {
+
+  lcd.init();                                                                //INICIA DISPLAY LCD 20X4
+  lcd.backlight();                                                           //ATIVA LUZ DE FUNDO DO DISPLAY
+  
+  Serial.begin(9600);                                                        //DEFINE A VELOCIDADE DA COMUNICACAO SERIAL
+
+  attachInterrupt(0, interrupcao, LOW);                                      //ATIVA A INTERRUPCAO EXTERNA BORDA DE DESCIDA NO CASO DE SER PRESSIONADO EMERGENCIA
+
+
+  pinMode(PWM_pin, OUTPUT);                                                  //DEFINE A PORTA COMO SAIDA
+  TCCR2B = TCCR2B & B11111000 | 0x03;                                        //PINOS 3 E 11 & 5 E 6 COM FREQUENCIA DE 928,5 Hz
+  Time = millis();
+  Last_State = 0;                                                            //(PINB & B00000001) -> DEFINE O PRIMEIRO ESTADO DO ENCODER
+  PCICR |= (1 << PCIE0);                                                     //HABILITA PCMSK0
+  PCMSK0 |= (1 << PCINT0);                                                   //PINO D8 GERA INTERRUPCAO EM QUALQUER MUDANCA DE ESTADO - PARA ENCODER
+  PCMSK0 |= (1 << PCINT1);                                                   //PINO D9 GERA INTERRUPCAO EM QUALQUER MUDANCA DE ESTADO - PARA ENCODER
+  PCMSK0 |= (1 << PCINT3);                                                   //PINO D11 GERA INTERRUPCAO EM QUALQUER MUDANCA DE ESTADO - PARA ENCODER
+
+  pinMode(11, INPUT);                                                        //ENTRADA DOS VALORES DO ENCODER SW - INTERRUPCAO
+  pinMode(7, INPUT);                                                         //ENTRADA DOS VALORES DO ENCODER DT - INTERRUPCAO
+  pinMode(9, OUTPUT);                                                        //SAIDA PARA PWM DO MOTOR
+  pinMode(8, INPUT);                                                         //ENTRADA DOS VALORES DO ENCODER CLK - INTERRUPCAO
+  pinMode(6, OUTPUT);                                                        //DEFINE SAIDA PARA BUZZER DE ESTADO
+  pinMode(2, INPUT);                                                         //ENTRADA BOTOEIRA DE EMERGENCIA INTERRUPCAO
+  pinMode(14, OUTPUT);                                                       
+
+  TCCR1B = 1;                                                                //MUDA A FREQUENCIA DE SAIDA DOS PINOS 9 e 10 PARA 62KHz PARA ELIMINAR RUIDO DO PWM DO MOTOR
+
+//###MENU DE SELECAO DE TERMOPLASTICOS###
+  lcd.setCursor(0, 0);                                                       
+  lcd.print("   SELECIONAR O");
+  lcd.setCursor(0, 1);
+  lcd.print("  TERMOPLASTICO:");
+  lcd.setCursor(0, 2);
+  lcd.print("-> GIRE O ENCODER <-");
+
+    do{
+
+    int a= analogRead(A0);
+    if(a<=341)
+    {
+      lcd.setCursor(0,3);
+      lcd.print(" --> PLA <--");
+      float set_temperature = 100;                                            //VALOR DE SET POINT - ALTERAR CONFORME TERMOPLASTICO
+    }
+    lcd.clear();
+    if(a<=682)
+    {
+      lcd.setCursor(0,3);
+      lcd.print(" --> ABS <--");
+      float set_temperature = 100;                                            //VALOR DE SET POINT - ALTERAR CONFORME TERMOPLASTICO
+    }
+    lcd.clear();
+    if(a>682)
+    {
+      lcd.setCursor(0,3);
+      lcd.print(" --> PET <--");
+      float set_temperature = 100;                                            //VALOR DE SET POINT - ALTERAR CONFORME TERMOPLASTICO
+    }
+    lcd.clear();
+    }while (digitalRead(11) == 1);
+    {
+      lcd.print("INICIANDO");
+      button_pressed=0;
+    }
+ 
+}//FIM SETUP
+
+void loop() {
+
+  if (temperature_read >= (set_temperature - 10))                             //VERIFICA SE A TEMPERATURA JA CHEGOU PROXIMO AO SET POINT ESTABELECIDO                                                                  
+  {
+    if (cont < 1) {                                                           //SE FOR O PRIMEIRO LOOP EMITE SINAL SONORO DE AVISO - SETPOINT ATINGIDO
+      tone(6, 349, 250);
+      delay(200);
+      tone(6, 394, 250);
+      delay(200);
+      tone(6, 440, 250);
+      delay(200);
+      cont++;
+    }
+    ValorAjuste = analogRead(AjustePWM);                                      //REALIZA A LEITURA DO VALOR ANALOGICO DO POTENCIOMETRO
+    Duty = map(ValorAjuste, 0, 1023, 0, 255);                                 //AJUSTA BITS ENTRE LEITURA ANALOGICA E SAIDA PWM
+    analogWrite(MotorPWM, Duty);                                              //GERA UMA SAIDA PWM NA PORTA DE SAIDA PARA O PWM DO MOTOR
+  }
+  if (cont >= 1)                                                              //CASO FOR OUTRO LOOP (MENOS PRIMEIRO)
+  {
+    ValorAjuste = analogRead(AjustePWM);                                      //FAZ LEITURA DO vALOR ANALOGICO E TRANSFORMA EM UM SINAL PWM PROPORCIONAL
+    Duty = map(ValorAjuste, 0, 1023, 0, 255); 
+    analogWrite(MotorPWM, Duty);
+
+  }
+
+  if (menu_activated == 0)
+  {
+    temperature_read = MediaMovel();                                          //LEITURA DO VALOR DE TEMPERATURA ATUAL COM FILTRO DE MEDIA MOVEL 10 VALORES EXCLUSAO DO MAIS ANTIGO
+    //delay(195.5);
+    //Next we calculate the error between the setpoint and the real value
+    PID_error = set_temperature - temperature_read + 3;                       //CALCULO DO ERRO ENTRE SET POIN E O VALOR LIDO                    
+    //Calculate the P value
+    PID_p = 0.01 * kp * PID_error;                                            //CALCULO DO GANHO PROPORCIONAL
+    //Calculate the I value in a range on +-3
+    PID_i = 0.01 * PID_i + (ki * PID_error);                                  //CALCULO DO GANHO INTEGRAL
+ 
+    timePrev = Time;                                                          //TEMPO QUE ANTERIOR- PARA CALCULO DO GANHO DERIVATIVO
+    Time = millis();                                                          //TEMPO ATUAL - PARA CALCULO DO GANHO DERIVATIVO
+    elapsedTime = (Time - timePrev) / 1000;                                   //TEMPO QUE PASSOU - PARA CALCULO DO GANHO DERIVATIVO
+  
+    PID_d = 0.01 * kd * ((PID_error - previous_error) / elapsedTime);         //CALCULO DO GANHO DERIVATIVO
+
+    PID_value = PID_p + PID_i + PID_d;                                        //VALOR PID COM A SOMA DE TODOS PARAMETROS P+I+D
+
+    if (PID_value < 0)                                                        //ESTABELECE LIMITES PARA OS VALORES DE PID
+    {
+      PID_value = 0;
+    }
+    if (PID_value > 255)
+    {
+      PID_value = 255;
+    }
+                                                                 
+     analogWrite(PWM_pin,255- PID_value);
+     //analogWrite(PWM_pin,64);                                               //TESTE PARA OBTENÇAO DA CURVA 1/4 pot
+    previous_error = PID_error;                                               //GRAVA ERRO ANTERIOR PARA O PROXIMO LOOP
+    
+    delay(250);                                                               //DELAY PARA LCD
+    //lcd.clear();
+
+    lcd.setCursor(0, 0);                                                      //MENU DA EXTRUSORA
+    lcd.print("#CONTROLE EXTRUSORA#");
+    lcd.setCursor(0, 1);
+    lcd.print("TEMP SETPOINT:");
+    lcd.setCursor(14, 1);
+    lcd.print(set_temperature, 1);
+    lcd.setCursor(0, 2);
+    lcd.print("TEMP REAL:");
+    lcd.setCursor(10, 2);
+    lcd.print(temperature_read, 1);
+    Serial.println(temperature_read);
+    lcd.setCursor(0, 3);
+    lcd.print("RPM:");
+    lcd.setCursor(5, 3);
+    lcd.print((analogRead(A0) * 0.034), 0);
+
+   
+  
+  }
+  
+  if (menu_activated == 1)                                                 //CASO MENU 01 SER SELECIONADO HABILITA MUDANCA DE TEMPERATURA
+  {
+    if (set_temperature != last_set_temperature)
+    {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Temperatura:");
+      lcd.setCursor(0, 1);
+      lcd.print(set_temperature);                                           
+    }
+    last_set_temperature = set_temperature;                                //ATUALIZA A TEMPERATURA
+  }
+  
+  if (menu_activated == 2)                                                 //CASO MENU 02 SER SELECIONADO HABILITA MUDANCA GANHO PROPORCIONAL
+  {
+
+    if (kp != last_kp)
+    {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("K proporcional");
+      lcd.setCursor(0, 1);
+      lcd.print(kp);
+    }
+    last_kp = kp;                                                         //ATUALIZA GANHO PROPORCIONAL
+  }
+  
+  if (menu_activated == 3)                                                //CASO MENU 03 SER SELECIONADO HABILITA MUDANCA GANHO INTEGRAL
+  {
+
+    if (ki != last_ki)
+    {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("K integral");
+      lcd.setCursor(0, 1);
+      lcd.print(ki);
+    }
+    last_ki = ki;                                                         //ATUALIZA GANHO DERIVATIVO
+  }
+ 
+  if (menu_activated == 4)                                                //CASO MENU 03 SER SELECIONADO HABILITA MUDANCA GANHO DERIVATIVO
+  {
+
+    if (kd != last_kd)
+    {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("K derivativo");
+      lcd.setCursor(0, 1);
+      lcd.print(kd);
+    }
+    last_kd = kd;                                                         //ATUALIZA GANHO DERIVATIVO
+  }
+}
+
+//###FUNCAO DE INTERRUPCAO###
+void interrupcao() {                                                      //CASO SEJA ACIONADO O BOTAO DE EMERGENCIA DESATIVA REGISTRADORES DO PWM MOTOR E AQUECIMENTO                                            
+  
+  TCCR2B = NULL;
+  TCCR1B = NULL;
+  digitalWrite(6, HIGH);
+
+}
+//###FUNÇÃO MÉDIA MÓVEL - FILTRO DIGITAL###
+double MediaMovel ()
+{
+  uint16_t tamanho = 10;                                                  //TAMANHO DO VETOR - PARA MÉDIA MÓVEL DE 10 VALORES
+  uint16_t vetor[tamanho], vetaux[tamanho], i = 0;                        //VETORES E VARIÁVEL PARA TROCA DE VALORES
+  float media = 0;
+
+  if (cont != 0)                                                          //CASO NÃO SEJA O PRIMEIRO LOOP
+  {
+    for (i = 0; i < tamanho; i++)
+    {
+      vetaux[i] = vetor[i];                                               //VETOR AUXILIAR RECEBE O VETOR MAIS ATUAL
+    }
+
+    vetor[0] = readThermocouple();                                        //VALOR MAIS ANTIGO DO VETOR ORIGINAL É SUBSTITUIDO PELO VALOR LIDO NO ADC
+
+    for (i = 1; i < tamanho; i++)
+    {
+      vetor[i] = vetaux[i - 1];                                           //DADOS MAIS RECENTES SÃO PASSADOS PARA O VETOR ORIGINAL NOVAMENTE
+    }
+  }
+  else                                                                    //SE FOR O PRIMEIRO LOOP PREENCHE O VETOR COM VALORES NOVOS
+  {
+    for (i = 0; i < tamanho; i++)
+    {
+      vetor[i] = readThermocouple();                                      //VETOR RECEBE VALOR LIDO PELA FUNÇÃO
+
+    }
+  }
+
+
+  for (i = 0; i < tamanho; i++)
+  {
+    media = media + vetor[i];                                              //REALIZA A SOMA FINAL DOS VALORES DO VETOR
+  }
+
+  media = media / tamanho;                                                 //MEDIA CONFORME TAMANHO DO VETOR
+
+  return (media);                                                          //RETORNA A MÉDIA PELA FUNÇÃO
+}
+
+//###FUNCAO DE TESTE PARA O TERMOPAR###
+double readThermocouple() {                                                //REALIZA O TESTE DE COMUNICAÇÂO COM O MODULO CONFORME DOCUMENTACAO
+
+  uint16_t v;
+  pinMode(MAX6675_CS, OUTPUT);
+  pinMode(MAX6675_SO, INPUT);
+  pinMode(MAX6675_SCK, OUTPUT);
+
+  digitalWrite(MAX6675_CS, LOW);
+  delay(1);
+
+  v = shiftIn(MAX6675_SO, MAX6675_SCK, MSBFIRST);
+  v <<= 8;
+  v |= shiftIn(MAX6675_SO, MAX6675_SCK, MSBFIRST);
+
+  digitalWrite(MAX6675_CS, HIGH);
+  if (v & 0x4)
+  {
+    return NAN;
+  }
+  v >>= 3;
+  return v * 0.25;
+}
+
+
+//###INTERRUPCAO NO MOMENTO EM QUE O ENCODER E PRESSIONADO###
+ISR(PCINT0_vect) {
+  if (menu_activated == 1)
+  {
+    clk_State =   (PINB & B00000001);                                     //LE O ESTADO DO PINO 8
+    dt_State  =   (PIND & B10000000);
+    if (clk_State != Last_State) {                                        //CHECA SE HOUVE MOVIMENTACAO NO ENCODER
+      if (dt_State != clk_State) {
+        set_temperature = set_temperature + 1 ;                           //AUMENTA TEMPERATURA EM 1°C
+      }
+      else {
+        set_temperature = set_temperature - 1;                            //DIMINUI TEMPERATURA EM 1°C
+      }
+    }
+    Last_State = clk_State;                                               //ATUALIZA OS DADOS
+  }
+                                                                          //REALIZA O MESMO PROCESSO PARA TODOS OS 4 MENUS
+  if (menu_activated == 2)
+  {
+    clk_State =   (PINB & B00000001);
+    dt_State  =   (PIND & B10000000);
+    if (clk_State != Last_State) {
+      if (dt_State != clk_State) {
+        kp = kp + 1 ;
+      }
+      else {
+        kp = kp - 1;
+      }
+    }
+    Last_State = clk_State; 
+  }
+  if (menu_activated == 3)
+  {
+    clk_State =   (PINB & B00000001);
+    dt_State  =   (PIND & B10000000);
+    if (clk_State != Last_State) {
+      if (dt_State != clk_State) {
+        ki = ki + 1 ;
+      }
+      else {
+        ki = ki - 1;
+      }
+    }
+  }
+  if (menu_activated == 4)
+  {
+    clk_State =   (PINB & B00000001); 
+    dt_State  =   (PIND & B10000000);
+    if (clk_State != Last_State) {
+
+      if (dt_State != clk_State) {
+        kd = kd + 1 ;
+      }
+      else {
+        kd = kd - 1;
+      }
+    }
+    Last_State = clk_State;
+  }
+  if (PINB & B00001000)                                                     //TESTA SE O PINO 11 FOI PRESSIONADO E REALIZA A NAVEGAÇÂO ENTRE OS MENUS SE PRESSIONAR ENCODER
+  {
+    button_pressed = 1;
+  }
+  else if (button_pressed == 1)
+  {
+    if (menu_activated == 4)
+    {
+      menu_activated = 0;
+      PID_values_fixed = 1;
+      button_pressed = 0;
+      delay(1000);
+    }
+    if (menu_activated == 3)
+    {
+      menu_activated = menu_activated + 1;
+      button_pressed = 0;
+      kd = kd + 1;
+      delay(1000);
+    }
+    if (menu_activated == 2)
+    {
+      menu_activated = menu_activated + 1;
+      button_pressed = 0;
+      ki = ki + 1;
+      delay(1000);
+    }
+    if (menu_activated == 1)
+    {
+      menu_activated = menu_activated + 1;
+      button_pressed = 0;
+      kp = kp + 1;
+      delay(1000);
+    }
+    if (menu_activated == 0 && PID_values_fixed != 1)
+    {
+      menu_activated = menu_activated + 1;
+      button_pressed = 0;
+      set_temperature = set_temperature + 1;
+      delay(1000);
+    }
+    PID_values_fixed = 0;
+  }
+}
