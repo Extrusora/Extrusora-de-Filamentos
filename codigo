@@ -132,21 +132,21 @@ void setup() {
     {
       lcd.setCursor(0,3);
       lcd.print(" --> PLA <--");
-      float set_temperature = 100;                                            //VALOR DE SET POINT - ALTERAR CONFORME TERMOPLASTICO
+      float set_temperature = 200;                                            //VALOR DE SET POINT - ALTERAR CONFORME TERMOPLASTICO
     }
     lcd.clear();
     if(a<=682)
     {
       lcd.setCursor(0,3);
       lcd.print(" --> ABS <--");
-      float set_temperature = 100;                                            //VALOR DE SET POINT - ALTERAR CONFORME TERMOPLASTICO
+      float set_temperature = 205;                                            //VALOR DE SET POINT - ALTERAR CONFORME TERMOPLASTICO
     }
     lcd.clear();
     if(a>682)
     {
       lcd.setCursor(0,3);
       lcd.print(" --> PET <--");
-      float set_temperature = 100;                                            //VALOR DE SET POINT - ALTERAR CONFORME TERMOPLASTICO
+      float set_temperature = 200;                                            //VALOR DE SET POINT - ALTERAR CONFORME TERMOPLASTICO
     }
     lcd.clear();
     }while (digitalRead(11) == 1);
